@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FG Video Notes (Local Only)</title>
+<style>
+  :root { --pad:10px; --gap:8px; --btnH:46px; --cols:3; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system, system-ui, sans-serif; background:#fff; color:#111; }
+  #player-wrap { position:relative; width:100%; height:50vh; background:#000; display:flex; align-items:center; justify-content:center; }
+  #videoEl { width:100%; height:100%; background:#000; }
+  main { padding: var(--pad); }
+  .row { margin-bottom: var(--gap); }
+  .grid { display:grid; grid-template-columns: repeat(var(--cols), 1fr); gap: var(--gap); }
+  input[type="file"], textarea, input[type="url"] { width:100%; font-size:16px; padding:10px; border:1px solid #ddd; border-radius:10px; }
+  button { width:100%; height:var(--btnH); font-size:16px; border:1px solid #ddd; background:#fff; border-radius:10px; }
+  button.primary { background:#f0f7ff; border-color:#cfe4ff; }
+  button.warn { background:#fff7e6; border-color:#ffe0a6; }
+  button.danger { background:#ffecec; border-color:#ffc4c4; }
+  #videoTitle { font-size:14px; color:#333; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .hint { font-size:12px; color:#666; }
+  #csv { min-height:140px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .toolbar { display:flex; gap:var(--gap); }
+  .toolbar > * { flex:1; }
+  .badge { font-size:12px; padding:2px 6px; border:1px solid #ccc; border-radius:999px; margin-left:6px; }
+</style>
+</head>
+<body>
+
+<!-- 上半分：ローカル動画のインライン再生（フルスクリーン禁止運用） -->
+<div id="player-wrap">
+  <video id="videoEl" playsinline controls></video>
+</div>
+
+<main>
+  <!-- ローカル動画の読み込み -->
+  <div class="row toolbar">
+    <input id="fileInput" type="file" accept="video/*" />
+    <button id="loadLocalBtn" class="primary">ファイル読込</button>
+  </div>
+  <div id="videoTitle" class="row"></div>
+
+  <!-- 範囲設定・再生制御 -->
+  <div class="row toolbar">
+    <button id="setStartBtn" class="warn">分析開始</button>
+    <button id="setEndBtn" class="warn">分析終了</button>
+    <button id="toStartBtn">⟸ Start</button>
+  </div>
+  <div class="row toolbar">
+    <button id="playBtn">▶︎ 再生</button>
+    <button id="pauseBtn">⏸ 停止</button>
+    <button id="back5Btn">⟲ -5s</button>
+  </div>
+  <div class="row toolbar">
+    <button id="fwd5Btn">⟳ +5s</button>
+    <button id="toEndBtn">End ⟹</button>
+    <span id="clock" class="badge">00:00</span>
+  </div>
+
+  <!-- イベントボタン（3列×12） -->
+  <div id="btnGrid" class="row grid"></div>
+  <div class="row hint">
+    ※ 先頭3つは主レイヤー（排他・区間）。他は<strong>瞬間イベント</strong>。先頭3以外は<strong>長押しで名前変更</strong>できます（端末保存）。
+  </div>
+
+  <!-- メモ（別レイヤー） -->
+  <div class="row"><textarea id="memoText" placeholder="任意メモ（イベントとは別レイヤーで記録）"></textarea></div>
+  <div class="row toolbar">
+    <button id="saveMemoBtn" class="primary">この時刻でメモ保存</button>
+    <button id="resetLabelsBtn" class="danger">ボタン名リセット</button>
+  </div>
+
+  <!-- CSV（コピペ用） -->
+  <div class="row hint">▼ コピー用CSV（選択→コピー）</div>
+  <div class="row"><textarea id="csv" readonly></textarea></div>
+  <div class="row toolbar"><button id="copyCsvBtn">CSVをコピー</button></div>
+</main>
+
+<script>
+  // ===== 初期ボタン構成（12個）=====
+  const DEFAULT_BUTTONS = [
+    // 0-2: 主レイヤー（排他）
+    { type:'primary', label:'相手ターン' },
+    { type:'primary', label:'自分ターン' },
+    { type:'primary', label:'五分ターン' },
+    // 3-11: 瞬間イベント（自由編集）
+    { type:'event', label:'コンボ' },
+    { type:'event', label:'起き攻め' },
+    { type:'event', label:'固め' },
+    { type:'event', label:'差し合い' },
+    { type:'event', label:'牽制' },
+    { type:'event', label:'セットプレイ' },
+    { type:'event', label:'弾抜け' },
+    { type:'event', label:'対空' },
+    { type:'event', label:'クラッチ' },
+  ];
+  const BTN_CFG_KEY = 'fg-btn-config-v1';
+  const TAP_GUARD_MS = 300;
+
+  // ===== 状態 =====
+  const videoEl = document.getElementById('videoEl');
+  let videoId = ''; let videoTitle = '';
+  let startSec = null; let endSec = null; let activePrimary = null;
+  let sessionId = Math.random().toString(36).slice(2,8);
+  let lastTapAt = 0;
+  const sessionLogs = []; // CSV出力用：{sessionId, videoId, thms, tsec, kind, label, action, memo}
+
+  // ===== Util =====
+  function secToHMS(sec){ sec=Math.max(0,Math.floor(sec||0)); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; const pad=n=>String(n).padStart(2,'0'); return h>0?`${h}:${pad(m)}:${pad(s)}`:`${pad(m)}:${pad(s)}`; }
+  function clampSec(sec){ if(startSec!=null&&sec<startSec)sec=startSec; if(endSec!=null&&sec>endSec)sec=endSec; return sec; }
+  function currentSec(){ return Math.floor(clampSec(videoEl.currentTime||0)); }
+  function updateClock(){ document.getElementById('clock').textContent = secToHMS(currentSec()); }
+  function debounceTap(){ const t=Date.now(); if(t-lastTapAt<TAP_GUARD_MS) return true; lastTapAt=t; return false; }
+
+  // ===== CSV =====
+  function pushCsvRow(row){ sessionLogs.push(row); renderCsv(); }
+  function renderCsv(){
+    const lines=[['SessionId','VideoId','THMS','TSec','Kind','Label','Action','Memo']];
+    sessionLogs.forEach(r=>lines.push([r.sessionId,r.videoId,r.thms,r.tsec,r.kind,r.label,r.action,r.memo||'']));
+    const csv=lines.map(cols=>cols.map(v=>{const s=(v??'').toString();return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"` : s;}).join(',')).join('\n');
+    document.getElementById('csv').value = csv;
+  }
+  function toCsvRow(p){ return { sessionId:p.sessionId, videoId:p.videoId, thms:p.thms, tsec:p.tsec, kind:p.kind, label:p.label, action:p.action, memo:p.memo||'' }; }
+  function buildPayload({kind,label,action,tsec,memo}){
+    return { sessionId, videoId, videoTitle, startSec:(startSec??''), endSec:(endSec??''), kind, label, action, tsec, thms:secToHMS(tsec), memo:memo||'' };
+  }
+
+  // ===== 記録 =====
+  function recordPrimary(label,t){
+    if(activePrimary){
+      const pEnd = buildPayload({ kind:'primary', label:activePrimary, action:'end', tsec:t });
+      pushCsvRow(toCsvRow(pEnd));
+    }
+    activePrimary = label;
+    const pStart = buildPayload({ kind:'primary', label, action:'start', tsec:t });
+    pushCsvRow(toCsvRow(pStart));
+  }
+  function recordEvent(label,t){ const p=buildPayload({ kind:'event', label, action:'-', tsec:t }); pushCsvRow(toCsvRow(p)); }
+  function recordMemo(text,t){ if(!text||!text.trim()) return alert('メモが空です'); const p=buildPayload({ kind:'memo', label:'メモ', action:'-', tsec:t, memo:text.trim() }); pushCsvRow(toCsvRow(p)); }
+
+  // ===== UI：読み込み =====
+  document.getElementById('loadLocalBtn').addEventListener('click', ()=>{
+    const inp=document.getElementById('fileInput'); if(!inp.files||!inp.files[0]) return alert('動画ファイルを選択してください');
+    const file=inp.files[0]; const url=URL.createObjectURL(file);
+    videoEl.src=url; videoEl.playbackRate=1.0;
+    videoId = file.name; videoTitle = file.name;
+    sessionId = Math.random().toString(36).slice(2,8);
+    startSec=null; endSec=null; activePrimary=null;
+    sessionLogs.length = 0; renderCsv();
+    document.getElementById('videoTitle').textContent=`📺 Local: ${file.name}`;
+    updateClock();
+  });
+
+  // ===== 範囲・再生・シーク =====
+  document.getElementById('setStartBtn').addEventListener('click', ()=>{
+    if(!videoEl.src) return alert('先にファイルを読み込んでください');
+    startSec = currentSec();
+    if(endSec!=null && startSec>endSec) endSec=null;
+    videoEl.currentTime = startSec; updateClock();
+  });
+  document.getElementById('setEndBtn').addEventListener('click', ()=>{
+    if(!videoEl.src) return alert('先にファイルを読み込んでください');
+    endSec = currentSec();
+    if(startSec!=null && endSec<startSec){ const t=startSec; startSec=endSec; endSec=t; videoEl.currentTime=startSec; }
+    if(activePrimary){
+      const p=buildPayload({ kind:'primary', label:activePrimary, action:'end', tsec:endSec });
+      pushCsvRow(toCsvRow(p));
+      activePrimary=null;
+    }
+    updateClock();
+  });
+
+  document.getElementById('playBtn').addEventListener('click', ()=> videoEl.play());
+  document.getElementById('pauseBtn').addEventListener('click', ()=> videoEl.pause());
+
+  function stepSeek(delta){
+    if(!videoEl.src) return;
+    let t=(videoEl.currentTime||0)+delta;
+    t = clampSec(t);
+    videoEl.currentTime = t;
+    updateClock();
+  }
+  document.getElementById('back5Btn').addEventListener('click', ()=> stepSeek(-5));
+  document.getElementById('fwd5Btn').addEventListener('click', ()=> stepSeek(5));
+
+  document.getElementById('toStartBtn').addEventListener('click', ()=>{
+    if(startSec==null) return alert('Startが未設定です');
+    videoEl.currentTime = startSec; updateClock();
+  });
+  document.getElementById('toEndBtn').addEventListener('click', ()=>{
+    if(endSec==null) return alert('Endが未設定です');
+    videoEl.currentTime = endSec; updateClock();
+  });
+
+  // ===== イベントボタン描画（3列×12：長押し改名） =====
+  function loadButtonsConfig(){
+    try{
+      const raw=localStorage.getItem(BTN_CFG_KEY); if(!raw) return DEFAULT_BUTTONS.slice(0,12);
+      const arr=JSON.parse(raw), merged=[];
+      for(let i=0;i<12;i++){
+        const def=DEFAULT_BUTTONS[i] || {type:'event',label:`イベント${i+1}`};
+        const cur=arr[i] || def;
+        merged.push(i<3 ? {type:'primary',label:def.label} : {type:'event',label:cur.label||def.label});
+      }
+      return merged;
+    }catch{ return DEFAULT_BUTTONS.slice(0,12); }
+  }
+  function saveButtonsConfig(cfg){ localStorage.setItem(BTN_CFG_KEY, JSON.stringify(cfg)); }
+  function renderButtons(){
+    const grid=document.getElementById('btnGrid'); grid.innerHTML='';
+    const cfg=loadButtonsConfig();
+    cfg.forEach((btn,idx)=>{
+      const el=document.createElement('button');
+      el.textContent=btn.label;
+      if(btn.type==='primary') el.classList.add('primary');
+      el.addEventListener('click', ()=>{
+        if(debounceTap()) return;
+        if(!videoEl.src) return alert('先にファイルを読み込んでください');
+        if(startSec==null) return alert('先に「分析開始」を押してください');
+        const t=currentSec();
+        if(btn.type==='primary') recordPrimary(btn.label,t); else recordEvent(btn.label,t);
+      });
+      if(idx>=3){
+        let tid=null;
+        el.addEventListener('touchstart',(e)=>{
+          tid=setTimeout(()=>{
+            e.preventDefault();
+            const name=prompt('ボタン名を変更', el.textContent);
+            if(name && name.trim()){
+              const cfg2=loadButtonsConfig();
+              cfg2[idx].label=name.trim();
+              saveButtonsConfig(cfg2);
+              renderButtons();
+            }
+          },600);
+        },{passive:true});
+        ['touchend','touchmove','touchcancel'].forEach(ev=>el.addEventListener(ev,()=>tid&&clearTimeout(tid)));
+      }
+      grid.appendChild(el);
+    });
+  }
+  renderButtons();
+
+  // メモ & 補助
+  document.getElementById('saveMemoBtn').addEventListener('click', ()=>{
+    if(!videoEl.src) return alert('先にファイルを読み込んでください');
+    if(startSec==null) return alert('先に「分析開始」を押してください');
+    recordMemo(document.getElementById('memoText').value, currentSec());
+    document.getElementById('memoText').value='';
+  });
+  document.getElementById('resetLabelsBtn').addEventListener('click', ()=>{
+    if(!confirm('ボタン名を初期化します。よろしいですか？')) return;
+    localStorage.removeItem(BTN_CFG_KEY);
+    renderButtons();
+  });
+  document.getElementById('copyCsvBtn').addEventListener('click', ()=>{
+    const ta=document.getElementById('csv'); ta.focus(); ta.select();
+    try { document.execCommand('copy'); } catch {}
+  });
+
+  // 時計更新
+  videoEl.addEventListener('timeupdate', updateClock);
+</script>
+</body>
+</html>
