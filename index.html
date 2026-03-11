@@ -197,9 +197,11 @@
 
   <!-- ▼ 再生・シーク（常時）：-5s｜再生/停止｜+5s -->
   <div id="playerControls" class="row">
-    <button id="back5Btn">⟲ -5s</button>
+    <button id="back3Btn">⟲ -3s</button>
+      <button id="back01Btn">⟲ -0.1s</button>
     <button id="togglePlayBtn">▶︎ 再生</button>
-    <button id="fwd5Btn">⟳ +5s</button>
+    <button id="fwd01Btn">⟳ +0.1s</button>
+    <button id="fwd3Btn">⟳ +3s</button>
   </div>
 
   <!-- ▼ 主（排他・1行記録） -->
@@ -356,7 +358,9 @@
     const box = document.getElementById('logList'); box.innerHTML = '';
     sessionLogs.forEach(r => {
       const row = document.createElement('div'); row.className = 'log-row';
-
+      row.addEventListener('click', () => {
+        videoEl.currentTime = clampSec(r.tsec);
+      });
       const left = document.createElement('div'); left.className = 'log-left';
       const del = document.createElement('button'); del.className = 'log-del'; del.textContent = '削除'; del.title='この行を削除';
       del.addEventListener('click', (e)=>{
@@ -376,10 +380,7 @@
 
       const label = document.createElement('div'); label.className='log-label'; label.textContent = r.label || '';
 
-      const jump = document.createElement('button'); jump.className='log-jump'; jump.textContent='ジャンプ'; jump.title='この時刻へジャンプ';
-      jump.addEventListener('click', (e)=>{ e.stopPropagation(); videoEl.currentTime = clampSec(r.tsec); label.classList.add('jumped'); setTimeout(()=>label.classList.remove('jumped'),160); });
-
-      row.appendChild(left); row.appendChild(label); row.appendChild(jump);
+      row.appendChild(left); row.appendChild(label);
       box.appendChild(row);
     });
   }
@@ -463,8 +464,10 @@
     if(!videoEl.src) return;
     let t=(videoEl.currentTime||0)+delta; t = clampSec(t); videoEl.currentTime = t;
   }
-  document.getElementById('back5Btn').addEventListener('click', ()=> stepSeek(-5));
-  document.getElementById('fwd5Btn').addEventListener('click',  ()=> stepSeek(5));
+document.getElementById('back3Btn').addEventListener('click', ()=> stepSeek(-3));
+document.getElementById('fwd3Btn').addEventListener('click',  ()=> stepSeek(3));
+  document.getElementById('back01Btn').addEventListener('click', ()=> stepSeek(-0.1));
+document.getElementById('fwd01Btn').addEventListener('click',  ()=> stepSeek(0.1));
 
   /* ===== 主ボタン描画 ===== */
   function renderPrimaryButtons(){
