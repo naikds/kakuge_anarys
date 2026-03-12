@@ -54,12 +54,12 @@ button.danger { background:#ffecec; border-color:#ffc4c4; }
 /* ▶ 再生/シーク（常時表示）：-5s｜再生/停止｜+5s */
 #playerControls { display:flex; gap: var(--gap); }
 
-/* 主：1行3つ */
+/* 主：1行4つ */
 #primaryGrid {
-  display:grid; grid-template-columns: repeat(3, 1fr);
+  display:grid; grid-template-columns: repeat(4, 1fr);
   gap: var(--gap);
 }
-/* イベント：4×2=8 */
+/* イベント：4×3=12 */
 #eventGrid {
   display:grid; grid-template-columns: repeat(4, 1fr);
   gap: var(--gap);
