@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Primaryタイムライン（プレビュー＝マーカー表示／PNG＝マーカー除外／開区間）</title>
+<style>
+  body { font-family: system-ui, "Segoe UI", sans-serif; margin: 16px; color: #222; }
+  textarea { width: 100%; height: 160px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 12px; }
+  canvas { border: none; display: block; max-width: 100%; background: transparent; }
+  .panel { margin-top: 8px; padding: 8px 10px; background: #f6f8fa; border: 1px solid #e5e7eb; border-radius: 6px; user-select: text; display: none; }
+  .panel code, .panel pre { font-size: 13px; white-space: pre-wrap; }
+  label { user-select: none; }
+</style>
+</head>
+<body>
+<h1 style="margin:0 0 8px 0;">Primaryタイムライン</h1>
+
+<div class="controls">
+  <button id="drawBtn">描画</button>
+  <button id="saveBtn">PNG保存（マーカー除外）</button>
+  <label>幅: <input id="widthInput" type="number" value="1200" style="width:90px"></label>
+  <label>高さ: <input id="heightInput" type="number" value="160" style="width:90px"></label>
+  <!-- 初期ON -->
+  <label><input id="excludeCinematics" type="checkbox" checked /> 演出を時間から除外（タイムラインを詰める）</label>
+</div>
+
+<!-- 初期はCSV空 -->
+<textarea id="csvInput"></textarea>
+
+<canvas id="timelineCanvas" width="1200" height="160"></canvas>
+
+<!-- ％はCanvas外に表示（画像には含まれない） -->
+<div id="percentPanel" class="panel">
+  <strong>割合:</strong> <code id="percentText"></code>
+</div>
+
+<!-- イベント一覧（Canvas外：画像には含まれない／コピペ可） -->
+<div id="eventPanel" class="panel">
+  <strong>イベント一覧（演出除外に連動・上側）:</strong>
+  <pre id="eventList"></pre>
+</div>
+
+<!-- ダメージ一覧（Canvas外：画像には含まれない／コピペ可） -->
+<div id="damagePanel" class="panel">
+  <strong>ダメージ一覧（演出除外に連動・下側）:</strong>
+  <pre id="damageList"></pre>
+</div>
+
+<script>
+// ===== 設定 =====
+const COLORS_BASE = {
+  "有利": "#d3f5d3",      // 淡い緑（帯）
+  "不利": "#f7d5d5",      // 淡い赤
+  "立ち回り": "#cfcfcf",  // 灰
+  "演出": "#000000"       // 黒
+};
+const COLORS_DAMAGE_OVERLAY = {
+  "有利": "rgba(46, 204, 113, 0.85)", // 濃い緑
+  "不利": "rgba(231, 76, 60, 0.85)"   // 濃い赤
+};
+const INSTANT_STROKE = {
+  "有利": "#2ecc71",
+  "不利": "#e74c3c",
+  "その他": "rgba(255,255,255,0.8)"
+};
+
+const BORDER_COLOR = "#ffffff";
+const BORDER_WIDTH = 3; // 白枠の太さ
+
+// タイムラインのみ：余白ゼロ。帯はキャンバス全面の高さ。
+const BAND = { y: 0, height: null }; // height は描画時に canvas.height を設定
+
+// マーカー（プレビューのみ表示）
+const EVENT_GLYPH_TOP = "●";   // 上側：event/memo（統一）
+const DAMAGE_GLYPH_BOTTOM = "○"; // 下側：damage（統一）
+
+// ===== ユーティリティ =====
+function parseCSV(text) {
+  const t = (text || "").trim();
+  if (!t) return [];
+  const lines = t.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  if (lines.length === 0) return [];
+  const header = lines[0].replace(/^\uFEFF/, "").split(",").map(h => h.trim());
+  const dataLines = lines.length > 1 ? lines.slice(1) : [];
+  return dataLines.filter(Boolean).map(line => {
+    const cols = line.split(",");
+    const row = {};
+    header.forEach((h, i) => row[h] = (cols[i] ?? "").trim());
+    if (row.TSec) row.TSec = parseFloat(row.TSec);
+    if (!row.TSec && row.THMS) row.TSec = hmsToSec(row.THMS);
+    return row;
+  });
+}
+function hmsToSec(hms) {
+  const parts = (hms || "").split(":").map(Number);
+  if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+  if (parts.length === 2) return parts[0]*60 + parts[1];
+  return Number(hms) || 0;
+}
+function secToLabel(t) {
+  const m = Math.floor(t / 60);
+  const s = t - m*60;
+  return `${String(m).padStart(2,"0")}:${s.toFixed(3).padStart(6,"0")}`;
+}
+function crispFloor(val) { return Math.floor(val); }
+function crispCeil(val)  { return Math.ceil(val); }
+
+// ===== データ整形 =====
+function buildPrimarySegments(rows) {
+  const startRow = rows.find(r => r.Kind === "mark" && r.Label === "分析開始");
+  const endRow   = rows.find(r => r.Kind === "mark" && r.Label === "分析終了");
+  if (!startRow || !endRow) return { segments: [], start: null, end: null };
+
+  const start = startRow.TSec;
+  const end   = endRow.TSec;
+  const primaries = rows
+    .filter(r => r.Kind === "primary")
+    .sort((a,b) => a.TSec - b.TSec)
+    .map(r => ({ t: r.TSec, label: r.Label }));
+
+  if (primaries.length === 0) {
+    return { segments: [{ start, end, label: "立ち回り" }], start, end };
+  }
+
+  const segs = [];
+  if (start < primaries[0].t) segs.push({ start, end: primaries[0].t, label: "立ち回り" });
+  for (let i = 0; i < primaries.length - 1; i++) {
+    const a = primaries[i], b = primaries[i+1];
+    segs.push({ start: a.t, end: b.t, label: a.label });
+  }
+  const last = primaries[primaries.length - 1];
+  if (last.t < end) segs.push({ start: last.t, end, label: last.label });
+  return { segments: segs.filter(s => s.end > s.start), start, end };
+}
+
+function buildDamage(rows) {
+  const combos = [];
+  const stack = [];
+  const instants = [];
+  const damages = rows.filter(r => r.Kind === "damage").sort((a,b) => a.TSec - b.TSec);
+  for (const r of damages) {
+    if (r.Label === "コンボ開始") stack.push(r.TSec);
+    else if (r.Label === "コンボ終了") {
+      const s = stack.pop();
+      if (s != null && r.TSec > s) combos.push({ start: s, end: r.TSec });
+    } else if (r.Label === "投げ" || r.Label === "ヒット") {
+      instants.push(r.TSec);
+    }
+  }
+  return { combos, instants };
+}
+
+// damage マーカー（瞬間＋開始/終了）
+function buildDamageMarkers(rows) {
+  const markers = [];
+  const damages = rows.filter(r => r.Kind === "damage").sort((a,b) => a.TSec - b.TSec);
+  for (const r of damages) {
+    if (!r.TSec && !r.THMS) continue;
+    const t = r.TSec || hmsToSec(r.THMS);
+    if (r.Label === "投げ" || r.Label === "ヒット") {
+      markers.push({ t, label: r.Label, kind: "instant" });
+    } else if (r.Label === "コンボ開始") {
+      markers.push({ t, label: r.Label, kind: "combo-start" });
+    } else if (r.Label === "コンボ終了") {
+      markers.push({ t, label: r.Label, kind: "combo-end" });
+    }
+  }
+  return markers;
+}
+
+function getLabelAtTime(segments, t) {
+  const s = segments.find(seg => t >= seg.start && t < seg.end);
+  return s?.label ?? segments[segments.length - 1]?.label;
+}
+
+// ===== 演出時間の除外（圧縮）ユーティリティ =====
+function mergeIntervals(intervals) {
+  if (intervals.length === 0) return [];
+  intervals.sort((a,b) => a.start - b.start);
+  const merged = [intervals[0]];
+  for (let i = 1; i < intervals.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = intervals[i];
+    if (cur.start <= prev.end) prev.end = Math.max(prev.end, cur.end);
+    else merged.push({ start: cur.start, end: cur.end });
+  }
+  return merged;
+}
+
+// ★ ここが変更点：内部のみ除外（開区間） => start < t && t < end
+function isExcluded(t, excluded) {
+  for (const iv of excluded) {
+    if (t > iv.start && t < iv.end) return true; // 境界は可視
+  }
+  return false;
+}
+
+// 除外区間を引いた可視部分を返す（境界は残すポリシーに整合）
+function subtractIntervals(s, e, excluded) {
+  let parts = [];
+  let cur = s;
+  for (const iv of excluded) {
+    if (iv.end <= cur) continue;       // 完全に前
+    if (iv.start >= e) break;          // 完全に後
+    // [cur, iv.start] まで可視（iv.start ちょうどは可視側に残す）
+    if (iv.start > cur) parts.push({ start: cur, end: Math.min(iv.start, e) });
+    // 次は iv.end から再開（iv.end ちょうどは可視）
+    cur = Math.max(cur, iv.end);
+    if (cur >= e) break;
+  }
+  if (cur < e) parts.push({ start: cur, end: e });
+  return parts;
+}
+
+function removedBefore(t, excluded) {
+  // t より前に実際に「内部」だけ削れた累積量を返す
+  let sum = 0;
+  for (const iv of excluded) {
+    if (t <= iv.start) break;
+    sum += Math.max(0, Math.min(t, iv.end) - Math.max(iv.start, -Infinity));
+    if (t < iv.end) break;
+  }
+  return sum;
+}
+
+function makeTimeToX(start, end, plotL, plotR, excluded, excludeOn) {
+  const usableW = plotR - plotL;
+  if (!excludeOn || excluded.length === 0) {
+    return (t) => plotL + ((t - start) / (end - start)) * usableW;
+  } else {
+    const totalExcluded = excluded.reduce((acc, iv) => acc + (iv.end - iv.start), 0);
+    const visibleTotal = Math.max(1e-9, (end - start) - totalExcluded);
+    return (t) => {
+      const tClamped = Math.max(start, Math.min(end, t));
+      const removed = removedBefore(tClamped, excluded);
+      const compressed = (tClamped - start) - removed;
+      return plotL + (compressed / visibleTotal) * usableW;
+    };
+  }
+}
+
+// ===== ％計算（Canvas外の表示用） =====
+function calcPercentages(segments, excludeCinematics, cinematicIntervals) {
+  const labelsAll = ["有利", "不利", "立ち回り", "演出"];
+  const includeLabels = excludeCinematics ? ["有利", "不利", "立ち回り"] : labelsAll;
+
+  const durations = Object.fromEntries(includeLabels.map(l => [l, 0]));
+  for (const seg of segments) {
+    if (!includeLabels.includes(seg.label)) continue;
+    const parts = excludeCinematics
+      ? subtractIntervals(seg.start, seg.end, cinematicIntervals)
+      : [{ start: seg.start, end: seg.end }];
+    for (const p of parts) durations[seg.label] += Math.max(0, p.end - p.start);
+  }
+
+  const total = Object.values(durations).reduce((a,b) => a + b, 0);
+  const percent = Object.fromEntries(includeLabels.map(l => [l, total > 0 ? (durations[l]/total)*100 : 0]));
+  return { durations, percent, total };
+}
+function formatPct(x) { return `${x.toFixed(1)}%`; }
+
+// ===== マーカー重なり回避（水平オフセット） =====
+function assignOffsets(items, timeToX) {
+  const thresholdPx = 2; // 2px 未満は同一とみなす
+  const offsets = [-12, -6, 0, 6, 12, 18, -18]; // ローテーション
+  const groups = [];
+  for (let i = 0; i < items.length; i++) {
+    const e = items[i];
+    const x = timeToX(e.t);
+    let group = groups.find(g => Math.abs(g.x - x) < thresholdPx);
+    if (!group) {
+      group = { x, members: [] };
+      groups.push(group);
+    }
+    group.members.push({ idx: i, x });
+  }
+  const result = new Array(items.length).fill(0);
+  for (const g of groups) {
+    g.members.forEach((m, i) => result[m.idx] = offsets[i % offsets.length]);
+  }
+  return result;
+}
+
+// ===== 描画（タイムラインのみ・背景透過＋白枠＋マーカー） =====
+// showMarkers: true = プレビューでマーカー表示 / false = PNG保存時は一切非表示
+function drawTimeline(canvas, segments, damage, allEvents, damageMarkers, start, end, excludeCinematics, showMarkers = true) {
+  const ctx = canvas.getContext("2d");
+  // 背景は塗らない（透明維持）
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  const W = canvas.width, H = canvas.height;
+  const plotL = 0, plotR = W; // 余白なし
+  const yTop = BAND.y, bandH = BAND.height ?? H; // 帯＝キャンバス全面の高さ
+
+  // 演出区間（マッピング・可視判定共通で使用）
+  const cinematicIntervalsRaw = segments
+    .filter(s => s.label === "演出")
+    .map(s => ({ start: Math.max(start, s.start), end: Math.min(end, s.end) }))
+    .filter(iv => iv.end > iv.start);
+  const cinematicIntervals = mergeIntervals(cinematicIntervalsRaw);
+
+  const timeToX = makeTimeToX(start, end, plotL, plotR, cinematicIntervals, excludeCinematics);
+
+  // primary帯（角丸なし）
+  for (const seg of segments) {
+    if (excludeCinematics && seg.label === "演出") continue;
+    const parts = excludeCinematics
+      ? subtractIntervals(seg.start, seg.end, cinematicIntervals)
+      : [{ start: seg.start, end: seg.end }];
+    for (const p of parts) {
+      const x1 = crispFloor(timeToX(p.start));
+      const x2 = crispCeil(timeToX(p.end));
+      const w = Math.max(1, x2 - x1);
+      ctx.fillStyle = COLORS_BASE[seg.label] ?? "#cccccc";
+      ctx.fillRect(x1, yTop, w, bandH);
+    }
+  }
+
+  // クリップ（ダメージは帯からはみ出しゼロ）
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(crispFloor(plotL), yTop, crispCeil(plotR) - crispFloor(plotL), bandH);
+  ctx.clip();
+
+  // ダメージ：コンボ（有利/不利のみ色付け）
+  for (const combo of damage.combos) {
+    const comboPartsBase = excludeCinematics
+      ? subtractIntervals(combo.start, combo.end, cinematicIntervals)
+      : [{ start: combo.start, end: combo.end }];
+
+    for (const base of comboPartsBase) {
+      for (const seg of segments) {
+        if (seg.end <= base.start || seg.start >= base.end) continue;
+        if (seg.label !== "有利" && seg.label !== "不利") continue;
+        const s = Math.max(base.start, seg.start);
+        const e = Math.min(base.end, seg.end);
+        if (e <= s) continue;
+
+        const x1 = crispFloor(timeToX(s));
+        const x2 = crispCeil(timeToX(e));
+        const w  = Math.max(1, x2 - x1);
+
+        ctx.fillStyle = COLORS_DAMAGE_OVERLAY[seg.label];
+        ctx.fillRect(x1, yTop, w, bandH); // 帯内ぴったり
+      }
+    }
+  }
+
+  // ダメージ：瞬間（投げ/ヒット）— 帯の上下ピッタリ
+  ctx.lineCap = "butt";
+  for (const t of damage.instants) {
+    if (excludeCinematics && isExcluded(t, cinematicIntervals)) continue; // 内部のみ除外
+    const label = getLabelAtTime(segments, t);
+    let color = INSTANT_STROKE["その他"];
+    if (label === "有利") color = INSTANT_STROKE["有利"];
+    else if (label === "不利") color = INSTANT_STROKE["不利"];
+
+    const x = timeToX(t);
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 10;
+    ctx.moveTo(x, yTop);
+    ctx.lineTo(x, yTop + bandH);
+    ctx.stroke();
+  }
+
+  // ===== マーカー（プレビューのみ） =====
+  if (showMarkers) {
+    // 上側：event/memo（内部のみ除外）
+    const visibleEvents = allEvents.filter(e => !(excludeCinematics && isExcluded(e.t, cinematicIntervals)));
+    visibleEvents.sort((a,b) => a.t - b.t);
+    visibleEvents.forEach((e, i) => e.no = i + 1);
+    const evOffsets = assignOffsets(visibleEvents, timeToX);
+
+    const glyphFontPxTop = Math.max(10, Math.min(16, Math.floor(bandH * 0.18)));
+    const numberFontPxTop = Math.max(10, Math.min(14, Math.floor(bandH * 0.18)));
+    const topInset = Math.max(4, Math.floor(bandH * 0.06)); // 上縁からの内側
+
+    // 記号（上）
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (let i = 0; i < visibleEvents.length; i++) {
+      const e = visibleEvents[i];
+      const gx = timeToX(e.t) + (evOffsets[i] || 0);
+      const gy = yTop + topInset;
+      const glyph = EVENT_GLYPH_TOP;
+
+      ctx.font = `bold ${glyphFontPxTop}px system-ui, sans-serif`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.9)"; // 縁取り
+      ctx.strokeText(glyph, gx, gy);
+      ctx.fillStyle = "#ffffff"; // 塗り
+      ctx.fillText(glyph, gx, gy);
+    }
+    // 番号（上）
+    for (let i = 0; i < visibleEvents.length; i++) {
+      const e = visibleEvents[i];
+      const nx = timeToX(e.t) + (evOffsets[i] || 0);
+      const ny = yTop + topInset + glyphFontPxTop + 1;
+      const text = String(e.no);
+
+      ctx.font = `bold ${numberFontPxTop}px system-ui, sans-serif`;
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(255,255,255,0.95)"; // 白縁
+      ctx.strokeText(text, nx, ny);
+      ctx.fillStyle = "rgba(0,0,0,0.9)"; // 黒文字
+      ctx.fillText(text, nx, ny);
+    }
+
+    // 下側：damage マーカー（内部のみ除外）
+    const visibleDm = damageMarkers.filter(d => !(excludeCinematics && isExcluded(d.t, cinematicIntervals)));
+    visibleDm.sort((a,b) => a.t - b.t);
+    visibleDm.forEach((d, i) => d.no = i + 1);
+    const dmOffsets = assignOffsets(visibleDm, timeToX);
+
+    const glyphFontPxBot = Math.max(10, Math.min(16, Math.floor(bandH * 0.18)));
+    const numberFontPxBot = Math.max(10, Math.min(14, Math.floor(bandH * 0.18)));
+    const bottomInset = Math.max(4, Math.floor(bandH * 0.06)); // 下縁からの内側
+
+    // 配置：下側は「番号 → その下に記号」
+    for (let i = 0; i < visibleDm.length; i++) {
+      const d = visibleDm[i];
+      const baseX = timeToX(d.t) + (dmOffsets[i] || 0);
+
+      // 番号（下：上寄せ）
+      const ny = yTop + bandH - bottomInset - (glyphFontPxBot + 1) - numberFontPxBot;
+      const text = String(d.no);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.font = `bold ${numberFontPxBot}px system-ui, sans-serif`;
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(255,255,255,0.95)";
+      ctx.strokeText(text, baseX, ny);
+      ctx.fillStyle = "rgba(0,0,0,0.9)";
+      ctx.fillText(text, baseX, ny);
+
+      // 記号（下：最下段寄せ）
+      const gy = yTop + bandH - bottomInset - glyphFontPxBot;
+      const glyph = DAMAGE_GLYPH_BOTTOM;
+      ctx.font = `bold ${glyphFontPxBot}px system-ui, sans-serif`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.9)";
+      ctx.strokeText(glyph, baseX, gy);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(glyph, baseX, gy);
+    }
+  }
+
+  // クリップ解除
+  ctx.restore();
+
+  // ===== 白い外枠 =====
+  ctx.strokeStyle = BORDER_COLOR;
+  ctx.lineWidth = BORDER_WIDTH;
+  const frameX = crispFloor(plotL);
+  const frameW = crispCeil(plotR) - frameX;
+  ctx.strokeRect(frameX, yTop, frameW, bandH);
+
+  // ===== ％とリスト（Canvas外DOM） =====
+  const cinematicIntervalsRaw2 = segments
+    .filter(s => s.label === "演出")
+    .map(s => ({ start: Math.max(start, s.start), end: Math.min(end, s.end) }))
+    .filter(iv => iv.end > iv.start);
+  const cinematicIntervals2 = mergeIntervals(cinematicIntervalsRaw2);
+  const { percent } = calcPercentages(segments, excludeCinematics, cinematicIntervals2);
+  const order = excludeCinematics ? ["有利", "不利", "立ち回り"] : ["有利", "不利", "立ち回り", "演出"];
+  const parts = order.map(l => `${l}: ${formatPct(percent[l] || 0)}`);
+  const pctText = parts.join(" / ");
+  const pctPanel = document.getElementById("percentPanel");
+  document.getElementById("percentText").textContent = pctText;
+  pctPanel.style.display = "block";
+
+  // イベント一覧（上側）
+  const eventsFiltered = (excludeCinematics)
+    ? allEvents.filter(e => !isExcluded(e.t, cinematicIntervals2))
+    : [...allEvents];
+  eventsFiltered.sort((a,b) => a.t - b.t);
+  const evLines = eventsFiltered.map((e, idx) => `#${idx+1}  ${secToLabel(e.t)}  ${e.label}${e.kind === "memo" ? " (memo)" : ""}`);
+  const evPanel = document.getElementById("eventPanel");
+  document.getElementById("eventList").textContent = evLines.join("\n");
+  evPanel.style.display = evLines.length ? "block" : "none";
+
+  // ダメージ一覧（下側）
+  const dmFiltered = (excludeCinematics)
+    ? damageMarkers.filter(d => !isExcluded(d.t, cinematicIntervals2))
+    : [...damageMarkers];
+  dmFiltered.sort((a,b) => a.t - b.t);
+  const dmLines = dmFiltered.map((d, idx) => `#${idx+1}  ${secToLabel(d.t)}  ${d.label}`);
+  const dmPanel = document.getElementById("damagePanel");
+  document.getElementById("damageList").textContent = dmLines.join("\n");
+  dmPanel.style.display = dmLines.length ? "block" : "none";
+}
+
+// ===== UI配線 =====
+const canvas = document.getElementById("timelineCanvas");
+
+function redraw() {
+  const csv = document.getElementById("csvInput").value;
+  const W = Math.max(100, Number(document.getElementById("widthInput").value) || 1200);
+  const H = Math.max(40, Number(document.getElementById("heightInput").value) || 160);
+  const excludeCinematics = document.getElementById("excludeCinematics").checked;
+
+  canvas.width = W;
+  canvas.height = H;
+
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0,0,canvas.width,canvas.height); // 透明クリア
+
+  try {
+    const rows = parseCSV(csv);
+    if (rows.length === 0) {
+      // 初期CSV空：UIは静かに待機
+      document.getElementById("percentPanel").style.display = "none";
+      document.getElementById("percentText").textContent = "";
+      document.getElementById("eventPanel").style.display = "none";
+      document.getElementById("eventList").textContent = "";
+      document.getElementById("damagePanel").style.display = "none";
+      document.getElementById("damageList").textContent = "";
+      return;
+    }
+
+    const { segments, start, end } = buildPrimarySegments(rows);
+    const damage = buildDamage(rows);
+    const allEvents = rows
+      .filter(r => (r.Kind === "event" || r.Kind === "memo") && r.TSec != null)
+      .map(r => ({ t: r.TSec, kind: r.Kind, label: r.Label }));
+    const damageMarkers = buildDamageMarkers(rows);
+
+    if (!start || !end || !segments || segments.length === 0) {
+      document.getElementById("percentPanel").style.display = "none";
+      document.getElementById("percentText").textContent = "";
+      document.getElementById("eventPanel").style.display = "none";
+      document.getElementById("eventList").textContent = "";
+      document.getElementById("damagePanel").style.display = "none";
+      document.getElementById("damageList").textContent = "";
+      return;
+    }
+
+    // プレビューはマーカー表示（true）
+    drawTimeline(canvas, segments, damage, allEvents, damageMarkers, start, end, excludeCinematics, true);
+  } catch (e) {
+    console.error(e);
+    document.getElementById("percentPanel").style.display = "none";
+    document.getElementById("percentText").textContent = "";
+    document.getElementById("eventPanel").style.display = "none";
+    document.getElementById("eventList").textContent = "";
+    document.getElementById("damagePanel").style.display = "none";
+    document.getElementById("damageList").textContent = "";
+  }
+}
+
+document.getElementById("drawBtn").addEventListener("click", redraw);
+
+document.getElementById("excludeCinematics").addEventListener("change", redraw);
+
+document.getElementById("saveBtn").addEventListener("click", () => {
+  // PNGの透明を維持して保存（マーカーは除外）
+  try {
+    const csv = document.getElementById("csvInput").value;
+    const rows = parseCSV(csv);
+    if (rows.length === 0) return;
+
+    const { segments, start, end } = buildPrimarySegments(rows);
+    const damage = buildDamage(rows);
+    const allEvents = rows
+      .filter(r => (r.Kind === "event" || r.Kind === "memo") && r.TSec != null)
+      .map(r => ({ t: r.TSec, kind: r.Kind, label: r.Label }));
+    const damageMarkers = buildDamageMarkers(rows);
+    if (!start || !end || !segments || segments.length === 0) return;
+
+    const excludeCinematics = document.getElementById("excludeCinematics").checked;
+
+    // オフスクリーンで同サイズキャンバスを用意
+    const off = document.createElement("canvas");
+    off.width = canvas.width;
+    off.height = canvas.height;
+
+    // ★ マーカー非表示（false）で再描画 → 透明PNG保存
+    drawTimeline(off, segments, damage, allEvents, damageMarkers, start, end, excludeCinematics, false);
+
+    const url = off.toDataURL("image/png");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "timeline.png";
+    a.click();
+  } catch (e) {
+    console.error(e);
+  }
+});
+
+// 初期描画（CSV空でも静かに透明のまま）
+window.addEventListener("DOMContentLoaded", redraw);
+</script>
+</body>
+</html>
