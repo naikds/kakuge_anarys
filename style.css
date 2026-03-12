@@ -1,0 +1,154 @@
+:root { --pad:10px; --gap:6px; --btnH:40px; --radius:10px; }
+* { box-sizing: border-box; }
+body { margin:0; font-family:-apple-system, system-ui, sans-serif; background:#fff; color:#111; }
+
+/* ▶ 動画（sticky） */
+#player-wrap {
+  position: sticky; top: 0; z-index: 10;
+  width:100%; height:50vh; background:#000;
+  display:flex; align-items:center; justify-content:center;
+}
+#videoEl { width:100%; height:100%; background:#000; }
+
+main { padding: var(--pad); }
+.row { margin-bottom: var(--gap); }
+
+input[type="file"], input[type="text"], textarea {
+  width:100%; font-size:15px; padding:8px 10px;
+  border:1px solid #ddd; border-radius:var(--radius);
+}
+button {
+  width:100%; height:var(--btnH); font-size:15px;
+  border:1px solid #ddd; background:#fff; border-radius:var(--radius);
+}
+button.primary { background:#f0f7ff; border-color:#cfe4ff; }
+button.warn { background:#fff7e6; border-color:#ffe0a6; }
+button.danger { background:#ffecec; border-color:#ffc4c4; }
+.toolbar { display:flex; gap: var(--gap); }
+.toolbar > * { flex:1; }
+.small { height:32px; font-size:13px; border-radius:8px; width:auto; padding:0 10px; }
+
+.hint { font-size:12px; color:#666; }
+.muted { color:#666; font-size:12px; }
+
+/* ▼ 詳細パネル（初期：表示） */
+#detailPanel {
+  border:1px solid #eee; border-radius:8px; padding:8px; background:#fafafa;
+}
+#detailHeader {
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+}
+#fileName {
+  flex:1 1 auto; min-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px;
+}
+#rangeText {
+  margin-left:auto; font-size:12px; color:#333; white-space:nowrap; flex:0 0 auto;
+}
+#fileExpanded { margin-top:8px; }
+#fileExpanded .toolbar > * { flex:1; }
+
+/* ▼ 範囲ボタン（最初から両方表示／両markで非表示） */
+#rangeButtons { display:flex; gap: var(--gap); }
+#rangeButtons.hidden { display:none; }
+
+/* ▶ 再生/シーク（常時表示）：-5s｜再生/停止｜+5s */
+#playerControls { display:flex; gap: var(--gap); }
+
+/* 主：1行3つ */
+#primaryGrid {
+  display:grid; grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap);
+}
+/* イベント：4×2=8 */
+#eventGrid {
+  display:grid; grid-template-columns: repeat(4, 1fr);
+  gap: var(--gap);
+}
+
+/* メモ（横：入力=7/ボタン=3） */
+#memoRow { display:flex; gap: var(--gap); align-items:center; }
+#memoInput { flex: 7 1 0%; }
+#saveMemoBtn { flex: 3 1 0%; }
+
+/* ログ（左=削除 / 中央=ラベル / 右=ジャンプ） */
+#logList { max-height: 180px; overflow-y: auto; border:1px solid #eee; border-radius:8px; padding:6px; }
+.log-row {
+  display:grid; grid-template-columns: auto 1fr auto; align-items:center;
+  gap:6px; padding:6px; border-bottom:1px solid #f3f3f3;
+}
+.log-row:last-child { border-bottom:none; }
+.log-left { display:flex; align-items:center; gap:6px; }
+.log-time { font-family: ui-monospace, Menlo, Consolas, monospace; color:#0a7; min-width:86px; text-align:right; }
+.log-kind { font-size:11px; color:#666; min-width:46px; text-align:center; border:1px solid #eee; border-radius:999px; padding:2px 6px; }
+.log-label {
+  flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:#111; padding:4px 2px; border-radius:6px;
+}
+.log-jump {
+  height:26px; padding:0 10px; border-radius:8px; border:1px solid #cfe4ff;
+  background:#f0f7ff; color:#0b63ff; font-size:12px; line-height:24px;
+}
+.log-del {
+  height:26px; padding:0 8px; border-radius:8px; border:1px solid #f3caca;
+  background:#ffecec; color:#a33; font-size:12px; line-height:24px;
+}
+.log-label.jumped { background:#eaf3ff; }
+
+/* 下部アクション（左：リセット／中：CSV／右：詳細トグル） */
+#bottomActions { display:flex; gap: var(--gap); align-items:center; }
+#toggleDetailBtn.small { min-width:40px; text-align:center; }
+
+/* 追加：CSVモーダルのベース */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.35);
+  display: none;               /* 初期非表示（JSで 'flex' に） */
+  align-items: center;
+  justify-content: center;
+  z-index: 999;                /* sticky動画(z-index:10)より前面に */
+}
+
+.modal {
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid #eee;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-body {
+  padding: 8px;
+  overflow: auto;
+}
+
+.modal-footer {
+  padding: 8px;
+  border-top: 1px solid #eee;
+  display: flex;
+  gap: 8px;
+}
+
+#csvBox {
+  width: 100%;
+  min-height: 220px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.close-btn {
+  width: auto;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+}
