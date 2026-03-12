@@ -1,14 +1,17 @@
 /* ===== 初期ボタン構成 ===== */
 const PRIMARY_BUTTONS = [
-  { type:'primary', label:'相手ターン' },
-  { type:'primary', label:'自分ターン' },
-  { type:'primary', label:'五分ターン' },
+  { type:'primary', label:'不利' },
+  { type:'primary', label:'有利' },
+  { type:'primary', label:'立ち回り' },
+  { type:'primary', label:'演出' },
 ];
 const DEFAULT_EVENTS = [
-  'コンボ','起き攻め','固め','差し合い','牽制','セットプレイ','弾抜け','対空'
+  'コンボ','ヒット','投げ','固め','起き攻め','置き','差し','差し返し','対空','無敵','バースト','壁割'
 ];
 const BTN_CFG_KEY = 'fg-event-config-v1';
 
+const DAMAGE_INSTANT_LABELS = new Set(['ヒット','投げ']);
+const DAMAGE_COMBO_TOGGLE_LABEL = 'コンボ';
 /* ===== 状態 ===== */
 const videoEl = document.getElementById('videoEl');
 let videoId = ''; let videoTitle = '';
@@ -18,6 +21,10 @@ let lastTapAt = 0, seqCounter = 0;
 
 // ログ：{ _id, _seq, sessionId, videoId, thms, tsec, kind, label }
 const sessionLogs = [];
+
+// コンボ状態の内部フラグ（UIはそのまま）
+let comboActive = false;
+
 
 /* ===== Util ===== */
 const round3 = (x) => Math.round(x * 1000) / 1000;
@@ -55,7 +62,7 @@ function renderCsv(){
 }
 
 /* ===== 並び順：TSec昇順 → kind優先度 → 追加順 ===== */
-function kindRank(k){ return k==='mark'?0 : k==='primary'?1 : k==='event'?2 : k==='memo'?3 : 4; }
+function kindRank(k){ return k==='mark'?0 : k==='primary'?1 : k==='damage'?2 : k==='event'?3 : k==='memo'?4 : 5; }
 function sortLogs(){
   sessionLogs.sort((a,b)=>{
     if (a.tsec !== b.tsec) return a.tsec - b.tsec;
@@ -125,7 +132,7 @@ function renderLogList(){
     });
     const tspan = document.createElement('div'); tspan.className='log-time'; tspan.textContent=r.thms;
     const kspan = document.createElement('div'); kspan.className='log-kind';
-    kspan.textContent = r.kind==='primary'?'主': r.kind==='event'?'Ev': r.kind==='memo'?'Memo':'Mark';
+    kspan.textContent = r.kind==='primary'?'主': r.kind==='event'?'Ev': r.kind==='damage'?'Dmg': r.kind==='memo'?'Memo':'Mark';
     left.appendChild(del); left.appendChild(tspan); left.appendChild(kspan);
 
     const label = document.createElement('div'); label.className='log-label'; label.textContent = r.label || '';
@@ -148,7 +155,10 @@ function buildPayload({kind,label,tsec}){
   return { sessionId, videoId, videoTitle, kind, label, tsec: ts, thms: secToHMS3(ts) };
 }
 function recordPrimary(label,t){ pushLogAndRender(toCsvRow(buildPayload({ kind:'primary', label, tsec:t }))); }
-function recordEvent(label,t){   pushLogAndRender(toCsvRow(buildPayload({ kind:'event',   label, tsec:t }))); }
+function recordEvent(label,t){ 
+  const routed = routeEventKindByLabel(label);
+  pushLogAndRender(toCsvRow(buildPayload({ kind:routed.kind,label:routed.label, tsec:t }))); 
+ }
 function recordMemoInline(text,t){
   const v=(text||'').trim(); if(!v){ alert('メモが空です'); return; }
   pushLogAndRender(toCsvRow(buildPayload({ kind:'memo', label:v, tsec:t })));
@@ -163,6 +173,26 @@ function recomputeRangeFromMarks(){
   }
   if (lastStart != null && lastEnd != null && lastEnd < lastStart) { const tmp=lastStart; lastStart=lastEnd; lastEnd=tmp; }
   startSec = lastStart; endSec = lastEnd;
+}
+
+
+function routeEventKindByLabel(label) {
+  //  コンボ（トグル開始/終了）
+  if (label === DAMAGE_COMBO_TOGGLE_LABEL) {
+    const out = comboActive
+      ? { kind: 'damage', label: 'コンボ終了' }
+      : { kind: 'damage', label: 'コンボ開始' };
+    comboActive = !comboActive;
+    return out;
+  }
+
+  // 3) 瞬間ダメージ（ヒット/投げ など）
+  if (DAMAGE_INSTANT_LABELS.has(label)) {
+    return { kind: 'damage', label: label };
+  }
+
+  // 4) それ以外は従来どおり event としてログ
+  return { kind: 'event', label };
 }
 
 /* ===== ファイル読込 ===== */
@@ -234,15 +264,15 @@ function renderPrimaryButtons(){
   });
 }
 
-/* ===== イベントボタン（4×2 / 長押し改名） ===== */
+/* ===== イベントボタン（4×3 / 長押し改名） ===== */
 function loadEventConfig(){
   try{
     const raw=localStorage.getItem(BTN_CFG_KEY);
-    if(!raw) return DEFAULT_EVENTS.slice(0,8);
+    if(!raw) return DEFAULT_EVENTS.slice(0,12);
     const arr=JSON.parse(raw), merged=[];
-    for(let i=0;i<8;i++){ merged.push((arr[i] && arr[i].trim()) ? arr[i].trim() : (DEFAULT_EVENTS[i] || `イベント${i+1}`)); }
+    for(let i=0;i<12;i++){ merged.push((arr[i] && arr[i].trim()) ? arr[i].trim() : (DEFAULT_EVENTS[i] || `イベント${i+1}`)); }
     return merged;
-  }catch{ return DEFAULT_EVENTS.slice(0,8); }
+  }catch{ return DEFAULT_EVENTS.slice(0,12); }
 }
 function saveEventConfig(list){ localStorage.setItem(BTN_CFG_KEY, JSON.stringify(list)); }
 function renderEventButtons(){
