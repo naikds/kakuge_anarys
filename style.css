@@ -1,6 +1,6 @@
 :root { --pad:10px; --gap:6px; --btnH:40px; --radius:10px; }
 * { box-sizing: border-box; }
-body { margin:0; font-family:-apple-system, system-ui, sans-serif; background:#fff; color:#111; }
+body { margin:0; font-family:-apple-system, system-ui, sans-serif; background:#fff; color:#111;touch-action: manipulation; }
 
 /* ▶ 動画（sticky） */
 #player-wrap {
@@ -152,3 +152,4 @@ button.danger { background:#ffecec; border-color:#ffc4c4; }
   padding: 0 12px;
   border-radius: 8px;
 }
+
