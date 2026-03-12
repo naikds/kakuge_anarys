@@ -14,7 +14,7 @@ main { padding: var(--pad); }
 .row { margin-bottom: var(--gap); }
 
 input[type="file"], input[type="text"], textarea {
-  width:100%; font-size:15px; padding:8px 10px;
+  width:100%; font-size:16px; padding:8px 10px;
   border:1px solid #ddd; border-radius:var(--radius);
 }
 button {
@@ -152,4 +152,5 @@ button.danger { background:#ffecec; border-color:#ffc4c4; }
   padding: 0 12px;
   border-radius: 8px;
 }
+
 
